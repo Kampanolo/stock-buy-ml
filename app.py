@@ -1,7 +1,8 @@
 # app.py — Stock Buy / Not Buy (Thai UI, Streamlit)
-# - แพตช์ให้โมเดลที่เทรนด้วย sklearn รุ่นเก่า ทำงานบนรุ่นใหม่ได้ (monotonic_cst)
-# - แสดงผลภาษาไทย + แปลง proba เป็น % (0..100)
-# - ใช้ข้อมูลงบการเงินจาก Yahoo Finance
+# - คำนวณ revenue_growth_ttm จริงจากงบ TTM ปัจจุบันเทียบ TTM ก่อนหน้า
+# - แพตช์ให้โมเดลเก่าใช้ได้กับ sklearn ใหม่ (เติม monotonic_cst)
+# - normalize proba ให้อยู่ในช่วง 0..1 เสมอ
+# - แสดงผลภาษาไทย
 
 import json
 import warnings
@@ -21,10 +22,8 @@ st.set_page_config(page_title="สแกนหุ้น: น่าซื้อ/�
 # โหลดโมเดล + แพตช์ความเข้ากันได้
 # =============================
 def _patch_monotonic_cst(model):
-    """
-    เติม attribute 'monotonic_cst' ให้ต้นไม้ภายใน RandomForest/ExtraTrees
-    เพื่อให้โมเดลที่เทรนด้วย sklearn รุ่นเก่า (เช่น 1.1.x) ใช้งานบน 1.4–1.5 ได้
-    """
+    """เติม attribute 'monotonic_cst' ให้ต้นไม้ภายใน RF/ET เพื่อให้โมเดล sklearn เก่า
+    ใช้กับ sklearn >=1.4 ได้"""
     try:
         est = model.steps[-1][1] if hasattr(model, "steps") else model
         if hasattr(est, "estimators_"):
@@ -35,8 +34,8 @@ def _patch_monotonic_cst(model):
         pass
 
 @st.cache_resource(show_spinner=False)
-def load_model_and_meta(model_path: str = "buy_model_pipeline.pkl",
-                        meta_path: str = "model_meta.json"):
+def load_model_and_meta(model_path="buy_model_pipeline.pkl",
+                        meta_path="model_meta.json"):
     pipe = None
     try:
         pipe = load(model_path)
@@ -66,7 +65,7 @@ FORWARD_MONTHS: int = meta.get("forward_months", 6)
 
 # คำอธิบายฟีเจอร์ (ไทยย่อ)
 FEATURE_DESC = {
-    "revenue_growth_ttm": "การเติบโตของรายได้ (TTM)",
+    "revenue_growth_ttm": "การเติบโตของรายได้ (TTM, เทียบ TTM ก่อนหน้า)",
     "gross_margin_ttm": "อัตรากำไรขั้นต้น (TTM)",
     "operating_margin_ttm": "อัตรากำไรจากการดำเนินงาน (TTM)",
     "net_margin_ttm": "อัตรากำไรสุทธิ (TTM)",
@@ -159,10 +158,11 @@ def build_one_row_for_streamlit(ticker: str, suffix: str, feature_cols: List[str
     if len(cols) == 0:
         return pd.DataFrame()
 
-    upto_cols = cols[:4]
-    col_curr = upto_cols[0]
+    upto_cols = cols[:4]     # 4 ไตรมาสล่าสุด
+    col_curr = upto_cols[0]  # งบล่าสุด
     col_prev = upto_cols[1] if len(upto_cols) > 1 else None
 
+    # ----- คำนวณค่า TTM -----
     rev_ttm  = _ttm_sum_partial(fin_q, ["total revenue","revenue"], upto_cols)
     cogs_ttm = _ttm_sum_partial(fin_q, ["cost of revenue","cost of goods"], upto_cols)
     gp_ttm   = rev_ttm - cogs_ttm if pd.notna(rev_ttm) and pd.notna(cogs_ttm) else np.nan
@@ -172,8 +172,17 @@ def build_one_row_for_streamlit(ticker: str, suffix: str, feature_cols: List[str
     int_ttm  = _ttm_sum_partial(fin_q, ["interest expense"], upto_cols)
     ocf_ttm  = _ttm_sum_partial(cf_q, ["operating cash flow","net cash provided by operating activities"], upto_cols)
 
+    # ----- คำนวณ revenue_growth_ttm = (TTM_now - TTM_prev) / TTM_prev -----
+    rev_ttm_prev = np.nan
+    if len(cols) >= 5:
+        prev_cols = cols[1:5]  # เลื่อนไป 1 ไตรมาส (อีก 4 ไตรมาสถัดไป)
+        rev_ttm_prev = _ttm_sum_partial(fin_q, ["total revenue","revenue"], prev_cols)
+    rev_growth_ttm = safe_div(rev_ttm - rev_ttm_prev, rev_ttm_prev)
+
+    # ----- งบแสดงฐานเฉลี่ย (ROE/ROA/Asset turnover) -----
     total_assets_avg = _avg_bs(bs_q, ["total assets"], col_curr, col_prev) if col_prev is not None else np.nan
-    sh_equity_avg    = _avg_bs(bs_q, ["total stockholder equity","total shareholders equity","total equity"], col_curr, col_prev) if col_prev is not None else np.nan
+    sh_equity_avg    = _avg_bs(bs_q, ["total stockholder equity","total shareholders equity","total equity"],
+                               col_curr, col_prev) if col_prev is not None else np.nan
 
     total_liab_curr  = _pick_at(bs_q, ["total liab","total liabilities"], col_curr)
     curr_liab_curr   = _pick_at(bs_q, ["total current liabilities","current liabilities"], col_curr)
@@ -182,7 +191,7 @@ def build_one_row_for_streamlit(ticker: str, suffix: str, feature_cols: List[str
     row = {
         "ticker": ticker,
         "asof": pd.Timestamp(col_curr).to_pydatetime(),
-        "revenue_growth_ttm": np.nan,  # ไม่คำนวณในตัวอย่างนี้
+        "revenue_growth_ttm": rev_growth_ttm,                 # << ใช้ค่าที่คำนวณจริง
         "gross_margin_ttm": safe_div(gp_ttm, rev_ttm),
         "operating_margin_ttm": safe_div(op_ttm, rev_ttm),
         "net_margin_ttm": safe_div(ni_ttm, rev_ttm),
