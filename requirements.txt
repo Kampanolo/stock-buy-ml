@@ -1,3 +1,8 @@
+# build tools (กัน error distutils และ build wheel)
+setuptools==69.5.1
+wheel==0.41.2
+
+# app deps (ตรงกับเครื่องที่เทรนโมเดล)
 streamlit==1.35.0
 yfinance==0.2.65
 pandas==2.0.3
