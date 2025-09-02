@@ -9,25 +9,46 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 from joblib import load
+import sklearn
 
 warnings.filterwarnings("ignore")
 st.set_page_config(page_title="สแกนหุ้น: น่าซื้อ/ไม่น่าซื้อ (Fundamental ML)", layout="wide")
 
 # ------------------------------
-# โหลดโมเดลและเมตาดาตา
+# โหลดโมเดล + แพตช์ความเข้ากันได้ (สำหรับ sklearn >= 1.4)
 # ------------------------------
+def _patch_monotonic_cst(model):
+    """
+    เติม attribute 'monotonic_cst' ให้ต้นไม้ภายใน RandomForest/ExtraTrees
+    เพื่อให้โมเดลที่เทรนด้วย sklearn รุ่นเก่า (เช่น 1.1.x) ใช้งานบน 1.4–1.5 ได้
+    """
+    try:
+        # ถ้าเป็น Pipeline ให้หยิบ estimator ตัวสุดท้าย
+        est = model.steps[-1][1] if hasattr(model, "steps") else model
+
+        # RandomForest/ExtraTrees จะมี list ชื่อ estimators_
+        if hasattr(est, "estimators_"):
+            for tree in est.estimators_:
+                if not hasattr(tree, "monotonic_cst"):
+                    setattr(tree, "monotonic_cst", None)
+    except Exception:
+        # เงียบไว้ ถ้าแพตช์ไม่ได้ก็ปล่อยให้ไปจับ exception ตอน predict อีกที
+        pass
+
 @st.cache_resource(show_spinner=False)
 def load_model_and_meta(model_path: str = "buy_model_pipeline.pkl",
                         meta_path: str = "model_meta.json"):
     try:
         pipe = load(model_path)
+        # แพตช์ความเข้ากันได้ทันทีหลังโหลด
+        _patch_monotonic_cst(pipe)
     except Exception as e:
         st.error(f"❌ โหลดโมเดลไม่ได้: {model_path}\n{e}")
         pipe = None
     try:
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
-    except Exception as e:
+    except Exception:
         st.warning("⚠️ อ่าน model_meta.json ไม่ได้ — ใช้ค่าเริ่มต้นแทน.")
         meta = {"feature_cols": [
             "revenue_growth_ttm","gross_margin_ttm","operating_margin_ttm","net_margin_ttm",
@@ -210,13 +231,21 @@ with col1:
         else:
             dfX = pd.concat(rows, ignore_index=True)
             X = dfX[FEATURE_COLS].astype(float)
+            # ลอง predict_proba ก่อน ถ้าไม่ได้ค่อย fallback เป็น predict
             try:
-                proba = pipe.predict_proba(X)[:,1]
+                proba = pipe.predict_proba(X)[:, 1]
             except Exception:
-                proba = pipe.predict(X).astype(float)
+                # เผื่อ sklearn รุ่นใหม่/เก่าแตกต่าง: แพตช์แล้วลองอีกที
+                _patch_monotonic_cst(pipe)
+                try:
+                    proba = pipe.predict_proba(X)[:, 1]
+                except Exception:
+                    proba = pipe.predict(X).astype(float)
+
             out = dfX[["ticker","asof"]].copy()
             out["proba_buy"] = proba
             out["pred"] = (out["proba_buy"] >= threshold).astype(int)
+
             # ---- แปลงหัวตาราง/ภาษาไทย ----
             df_show = out.copy()
             df_show["โอกาสน่าซื้อ (%)"] = (df_show["proba_buy"]*100).round(1)
@@ -226,8 +255,10 @@ with col1:
                 "asof": "งบ ณ วันที่",
             })[["หลักทรัพย์","งบ ณ วันที่","โอกาสน่าซื้อ (%)","ผลการประเมิน"]]\
                .sort_values("โอกาสน่าซื้อ (%)", ascending=False).reset_index(drop=True)
+
             st.dataframe(df_show, use_container_width=True, height=420)
-            st.download_button("💾 ดาวน์โหลด CSV", df_show.to_csv(index=False).encode("utf-8"),
+            st.download_button("💾 ดาวน์โหลด CSV",
+                               df_show.to_csv(index=False).encode("utf-8"),
                                "predictions_streamlit_th.csv", "text/csv")
 
 with col2:
@@ -240,8 +271,9 @@ with col2:
     for key in FEATURE_COLS:
         th = FEATURE_DESC.get(key, key)
         st.markdown(f"- `{key}` — {th}")
-    st.markdown("""
+    st.markdown(f"""
 **โมเดล:** `sklearn Pipeline` (SimpleImputer → RandomForestClassifier)  
+**เวอร์ชันรันไทม์:** scikit-learn `{sklearn.__version__}`  
 **หมายเหตุ:** แอปนี้เพื่อการศึกษา **ไม่ใช่คำแนะนำการลงทุน**
 """)
 
