@@ -1,5 +1,8 @@
-# app.py — Stock Buy/Not Buy (Thai UI)
-# เวอร์ชันภาษาไทย: เปลี่ยนหัวตาราง/เมนู/Model info ให้เข้าใจง่าย
+# app.py — Stock Buy / Not Buy (Thai UI, Streamlit)
+# - แพตช์ให้โมเดลที่เทรนด้วย sklearn รุ่นเก่า ทำงานบนรุ่นใหม่ได้ (monotonic_cst)
+# - แสดงผลภาษาไทย + แปลง proba เป็น % (0..100)
+# - ใช้ข้อมูลงบการเงินจาก Yahoo Finance
+
 import json
 import warnings
 from typing import List
@@ -14,48 +17,46 @@ import sklearn
 warnings.filterwarnings("ignore")
 st.set_page_config(page_title="สแกนหุ้น: น่าซื้อ/ไม่น่าซื้อ (Fundamental ML)", layout="wide")
 
-# ------------------------------
-# โหลดโมเดล + แพตช์ความเข้ากันได้ (สำหรับ sklearn >= 1.4)
-# ------------------------------
+# =============================
+# โหลดโมเดล + แพตช์ความเข้ากันได้
+# =============================
 def _patch_monotonic_cst(model):
     """
     เติม attribute 'monotonic_cst' ให้ต้นไม้ภายใน RandomForest/ExtraTrees
     เพื่อให้โมเดลที่เทรนด้วย sklearn รุ่นเก่า (เช่น 1.1.x) ใช้งานบน 1.4–1.5 ได้
     """
     try:
-        # ถ้าเป็น Pipeline ให้หยิบ estimator ตัวสุดท้าย
         est = model.steps[-1][1] if hasattr(model, "steps") else model
-
-        # RandomForest/ExtraTrees จะมี list ชื่อ estimators_
         if hasattr(est, "estimators_"):
             for tree in est.estimators_:
                 if not hasattr(tree, "monotonic_cst"):
                     setattr(tree, "monotonic_cst", None)
     except Exception:
-        # เงียบไว้ ถ้าแพตช์ไม่ได้ก็ปล่อยให้ไปจับ exception ตอน predict อีกที
         pass
 
 @st.cache_resource(show_spinner=False)
 def load_model_and_meta(model_path: str = "buy_model_pipeline.pkl",
                         meta_path: str = "model_meta.json"):
+    pipe = None
     try:
         pipe = load(model_path)
-        # แพตช์ความเข้ากันได้ทันทีหลังโหลด
         _patch_monotonic_cst(pipe)
     except Exception as e:
         st.error(f"❌ โหลดโมเดลไม่ได้: {model_path}\n{e}")
-        pipe = None
+
     try:
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
     except Exception:
         st.warning("⚠️ อ่าน model_meta.json ไม่ได้ — ใช้ค่าเริ่มต้นแทน.")
-        meta = {"feature_cols": [
-            "revenue_growth_ttm","gross_margin_ttm","operating_margin_ttm","net_margin_ttm",
-            "roe_ttm","roa_ttm","debt_to_equity","ocf_to_cl","interest_coverage","asset_turnover_ttm"
-        ],
-        "exchange_suffix": ".BK",
-        "forward_months": 6}
+        meta = {
+            "feature_cols": [
+                "revenue_growth_ttm","gross_margin_ttm","operating_margin_ttm","net_margin_ttm",
+                "roe_ttm","roa_ttm","debt_to_equity","ocf_to_cl","interest_coverage","asset_turnover_ttm"
+            ],
+            "exchange_suffix": ".BK",
+            "forward_months": 6
+        }
     return pipe, meta
 
 pipe, meta = load_model_and_meta()
@@ -77,9 +78,9 @@ FEATURE_DESC = {
     "asset_turnover_ttm": "ประสิทธิภาพใช้สินทรัพย์ (รายได้ / สินทรัพย์เฉลี่ย)",
 }
 
-# ------------------------------
-# Helper เหมือนตอนเทรน
-# ------------------------------
+# =============================
+# Helpers สำหรับคำนวณฟีเจอร์
+# =============================
 def add_suffix_if_needed(symbol: str, suffix: str) -> str:
     return symbol if "." in symbol else (symbol + suffix)
 
@@ -181,7 +182,7 @@ def build_one_row_for_streamlit(ticker: str, suffix: str, feature_cols: List[str
     row = {
         "ticker": ticker,
         "asof": pd.Timestamp(col_curr).to_pydatetime(),
-        "revenue_growth_ttm": np.nan,
+        "revenue_growth_ttm": np.nan,  # ไม่คำนวณในตัวอย่างนี้
         "gross_margin_ttm": safe_div(gp_ttm, rev_ttm),
         "operating_margin_ttm": safe_div(op_ttm, rev_ttm),
         "net_margin_ttm": safe_div(ni_ttm, rev_ttm),
@@ -198,9 +199,9 @@ def build_one_row_for_streamlit(ticker: str, suffix: str, feature_cols: List[str
             df[c] = np.nan
     return df
 
-# ------------------------------
+# =============================
 # UI
-# ------------------------------
+# =============================
 st.title("📈 สแกนหุ้น: น่าซื้อ / ไม่น่าซื้อ (Fundamental ML)")
 st.caption("ใช้ข้อมูลงบการเงินจาก Yahoo Finance สร้างฟีเจอร์ 10 ตัว แล้วพยากรณ์ว่าหุ้น ‘น่าซื้อ’ หรือไม่")
 
@@ -212,9 +213,9 @@ with st.sidebar:
     threshold = st.slider("เกณฑ์ตัดสิน (น่าซื้อเมื่อความน่าจะเป็น ≥ เกณฑ์)", 0.1, 0.9, 0.5, 0.01)
     run_btn = st.button("🔮 พยากรณ์")
 
-col1, col2 = st.columns([2,1])
+left, right = st.columns([2,1])
 
-with col1:
+with left:
     st.subheader("ผลการพยากรณ์")
     if pipe is None:
         st.info("โปรดวางไฟล์ buy_model_pipeline.pkl และ model_meta.json ไว้โฟลเดอร์เดียวกับแอป")
@@ -231,51 +232,58 @@ with col1:
         else:
             dfX = pd.concat(rows, ignore_index=True)
             X = dfX[FEATURE_COLS].astype(float)
-            # ลอง predict_proba ก่อน ถ้าไม่ได้ค่อย fallback เป็น predict
+
+            # ----- คำนวณ proba พร้อม normalize ให้เป็น 0..1 เสมอ -----
             try:
-                proba = pipe.predict_proba(X)[:, 1]
+                proba = pipe.predict_proba(X)[:, 1].astype(float)
             except Exception:
-                # เผื่อ sklearn รุ่นใหม่/เก่าแตกต่าง: แพตช์แล้วลองอีกที
                 _patch_monotonic_cst(pipe)
                 try:
-                    proba = pipe.predict_proba(X)[:, 1]
+                    proba = pipe.predict_proba(X)[:, 1].astype(float)
                 except Exception:
                     proba = pipe.predict(X).astype(float)
+
+            proba = np.asarray(proba, dtype=float).reshape(-1)
+            while np.nanmax(proba) > 1.0:
+                proba = proba / 100.0
+            proba = np.clip(proba, 0.0, 1.0)
+            # -------------------------------------------------------
 
             out = dfX[["ticker","asof"]].copy()
             out["proba_buy"] = proba
             out["pred"] = (out["proba_buy"] >= threshold).astype(int)
 
-            # ---- แปลงหัวตาราง/ภาษาไทย ----
             df_show = out.copy()
-            df_show["โอกาสน่าซื้อ (%)"] = (df_show["proba_buy"]*100).round(1)
-            df_show["ผลการประเมิน"] = np.where(df_show["pred"]==1, "น่าซื้อ ✅", "ไม่น่าซื้อ ❌")
-            df_show = df_show.rename(columns={
-                "ticker": "หลักทรัพย์",
-                "asof": "งบ ณ วันที่",
-            })[["หลักทรัพย์","งบ ณ วันที่","โอกาสน่าซื้อ (%)","ผลการประเมิน"]]\
-               .sort_values("โอกาสน่าซื้อ (%)", ascending=False).reset_index(drop=True)
+            df_show["โอกาสน่าซื้อ (%)"] = (df_show["proba_buy"] * 100).round(1)
+            df_show["ผลการประเมิน"]   = np.where(df_show["pred"] == 1, "น่าซื้อ ✅", "ไม่น่าซื้อ ❌")
+            df_show = df_show.rename(columns={"ticker": "หลักทรัพย์", "asof": "งบ ณ วันที่"})[
+                ["หลักทรัพย์","งบ ณ วันที่","โอกาสน่าซื้อ (%)","ผลการประเมิน"]
+            ].sort_values("โอกาสน่าซื้อ (%)", ascending=False).reset_index(drop=True)
 
             st.dataframe(df_show, use_container_width=True, height=420)
-            st.download_button("💾 ดาวน์โหลด CSV",
-                               df_show.to_csv(index=False).encode("utf-8"),
-                               "predictions_streamlit_th.csv", "text/csv")
+            st.download_button(
+                "💾 ดาวน์โหลด CSV",
+                df_show.to_csv(index=False).encode("utf-8"),
+                "predictions_streamlit_th.csv",
+                "text/csv",
+            )
 
-with col2:
+with right:
     st.subheader("ข้อมูลโมเดล")
-    st.markdown(f"""
-**นิยามป้ายกำกับ (Label):** ผลตอบแทนล่วงหน้า **{FORWARD_MONTHS} เดือน > 0%** ⇒ *น่าซื้อ*  
-**เกณฑ์ตัดสินปัจจุบัน:** proba ≥ **{threshold if 'threshold' in locals() else 0.5:.2f}**
-""")
+    st.markdown(
+        f"**นิยามป้ายกำกับ (Label):** ผลตอบแทนล่วงหน้า **{FORWARD_MONTHS} เดือน > 0%** ⇒ *น่าซื้อ*  \n"
+        f"**เกณฑ์ตัดสินปัจจุบัน:** proba ≥ **{threshold if 'threshold' in locals() else 0.5:.2f}**"
+    )
     st.markdown("**ฟีเจอร์ที่ใช้ (10 ตัว):**")
     for key in FEATURE_COLS:
         th = FEATURE_DESC.get(key, key)
         st.markdown(f"- `{key}` — {th}")
-    st.markdown(f"""
-**โมเดล:** `sklearn Pipeline` (SimpleImputer → RandomForestClassifier)  
-**เวอร์ชันรันไทม์:** scikit-learn `{sklearn.__version__}`  
-**หมายเหตุ:** แอปนี้เพื่อการศึกษา **ไม่ใช่คำแนะนำการลงทุน**
-""")
+
+    st.markdown(
+        f"**โมเดล:** `sklearn Pipeline` (SimpleImputer → RandomForestClassifier)  \n"
+        f"**เวอร์ชันรันไทม์:** scikit-learn `{sklearn.__version__}`  \n"
+        f"**หมายเหตุ:** เพื่อการศึกษา **ไม่ใช่คำแนะนำการลงทุน**"
+    )
 
     st.markdown("---")
     st.subheader("ดูกราฟราคาเร็ว ๆ")
